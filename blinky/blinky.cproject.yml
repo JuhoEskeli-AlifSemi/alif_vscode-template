@@ -16,3 +16,10 @@ project:
 
   packs:
     - pack: AlifSemiconductor::Ensemble
+    - pack: ARM::CMSIS
+    - pack: ARM::CMSIS-Compiler
+  components:
+    - component: CMSIS Driver:SPI
+    - component: CMSIS-Compiler:CORE
+    - component: CMSIS-Compiler:STDOUT:Custom
+    - component: Services:Retarget IO:STDOUT

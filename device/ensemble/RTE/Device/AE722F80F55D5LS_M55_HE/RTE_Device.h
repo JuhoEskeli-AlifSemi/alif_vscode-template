@@ -1780,7 +1780,7 @@
 //    <1=> ENABLE
 // <i> Defines SS state after each data frame for SPI0.
 // <i> Default: 1
-#define RTE_SPI0_SSTE_ENABLE                     1
+#define RTE_SPI0_SSTE_ENABLE                     0
 
 // <o> SPI0 Master SS SW
 //    <0=> DISABLE
@@ -3409,7 +3409,7 @@
 //    <1=> ENABLE
 // <i> Defines Blocking mode support for UART4
 // <i> Default: DISABLE
-#define RTE_UART4_BLOCKING_MODE_ENABLE 0
+#define RTE_UART4_BLOCKING_MODE_ENABLE 1
 
 #endif  // UART4
 
