@@ -1911,7 +1911,7 @@
 //    <1=> ENABLE
 // <i> Defines SS state after each data frame for SPI1.
 // <i> Default: 1
-#define RTE_SPI1_SSTE_ENABLE                     1
+#define RTE_SPI1_SSTE_ENABLE                     0
 
 // <o> SPI1 Master SS SW
 //    <0=> DISABLE

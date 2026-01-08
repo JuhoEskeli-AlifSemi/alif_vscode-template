@@ -1497,7 +1497,7 @@
 // <6=> PIN6 <7=> PIN7
 #define BOARD_SPI1_MISO_GPIO_PIN                        4
 // <o> "SPI1_MISO_B" GPIO pin alternate function <0-7>
-#define BOARD_SPI1_MISO_ALTERNATE_FUNCTION              1
+#define BOARD_SPI1_MISO_ALTERNATE_FUNCTION              2
 
 // <o> "SPI1_MOSI_B" GPIO port number <0=> GPIO0 <1=> GPIO1 <2=> GPIO2 <3=> GPIO3 <4=> GPIO4 <5=>
 // GPIO5 <6=> GPIO6 <7=> GPIO7 <8=> GPIO8 <9=> GPIO9 <10=> GPIO10 <11=> GPIO11 <12=> GPIO12 <13=>
@@ -1507,7 +1507,7 @@
 // <6=> PIN6 <7=> PIN7
 #define BOARD_SPI1_MOSI_GPIO_PIN                        5
 // <o> "SPI1_MOSI_B" GPIO pin alternate function <0-7>
-#define BOARD_SPI1_MOSI_ALTERNATE_FUNCTION              1
+#define BOARD_SPI1_MOSI_ALTERNATE_FUNCTION              2
 
 // <o> "SPI1_SCLK_B" GPIO port number <0=> GPIO0 <1=> GPIO1 <2=> GPIO2 <3=> GPIO3 <4=> GPIO4 <5=>
 // GPIO5 <6=> GPIO6 <7=> GPIO7 <8=> GPIO8 <9=> GPIO9 <10=> GPIO10 <11=> GPIO11 <12=> GPIO12 <13=>
@@ -1517,7 +1517,7 @@
 // <5=> PIN5 <6=> PIN6 <7=> PIN7
 #define BOARD_SPI1_SCLK_GPIO_PIN                        6
 // <o> "SPI1_SCLK_B" GPIO pin alternate function <0-7>
-#define BOARD_SPI1_SCLK_ALTERNATE_FUNCTION              1
+#define BOARD_SPI1_SCLK_ALTERNATE_FUNCTION              2
 
 // <o> "SPI1_SS0_B" GPIO port number <0=> GPIO0 <1=> GPIO1 <2=> GPIO2 <3=> GPIO3 <4=> GPIO4 <5=>
 // GPIO5 <6=> GPIO6 <7=> GPIO7 <8=> GPIO8 <9=> GPIO9 <10=> GPIO10 <11=> GPIO11 <12=> GPIO12 <13=>
@@ -1527,7 +1527,7 @@
 // <6=> PIN6 <7=> PIN7
 #define BOARD_SPI1_SS0_GPIO_PIN                         7
 // <o> "SPI1_SS0_B" GPIO pin alternate function <0-7>
-#define BOARD_SPI1_SS0_ALTERNATE_FUNCTION               1
+#define BOARD_SPI1_SS0_ALTERNATE_FUNCTION               2
 
 // <o> "MW_SPI_MASTER_MISO_B" GPIO port number <0=> GPIO0 <1=> GPIO1 <2=> GPIO2 <3=> GPIO3 <4=>
 // GPIO4 <5=> GPIO5 <6=> GPIO6 <7=> GPIO7 <8=> GPIO8 <9=> GPIO9 <10=> GPIO10 <11=> GPIO11 <12=>
