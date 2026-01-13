@@ -26,6 +26,7 @@
 #include "pinconf.h"
 #include "RTE_Components.h"
 #include "board_config.h"
+#include "SPI_support.h"
 
 #if defined(RTE_CMSIS_Compiler_STDOUT)
 #include "retarget_init.h"
@@ -45,14 +46,14 @@
 #define SPI1                           1 /* SPI1 instance */
 #define SPI0                           0 /* SPI0 instance */
 
-volatile uint8_t spi1_cb_status = 0;
-volatile uint8_t spi0_cb_status = 0;
+static volatile uint8_t spi1_cb_status = 0;
+static volatile uint8_t spi0_cb_status = 0;
 
 extern ARM_DRIVER_SPI ARM_Driver_SPI_(SPI1);
-ARM_DRIVER_SPI       *ptrSPI1 = &ARM_Driver_SPI_(SPI1);
+static ARM_DRIVER_SPI       *ptrSPI1 = &ARM_Driver_SPI_(SPI1);
 
 extern ARM_DRIVER_SPI ARM_Driver_SPI_(SPI0);
-ARM_DRIVER_SPI       *ptrSPI0 = &ARM_Driver_SPI_(SPI0);
+static ARM_DRIVER_SPI       *ptrSPI0 = &ARM_Driver_SPI_(SPI0);
 
 #if (!USE_CONDUCTOR_TOOL_PINS_CONFIG)
 /**
@@ -102,7 +103,7 @@ static int32_t board_spi_pins_config(void)
     return ret;
 }
 #endif
-
+#if 0
 /**
  * @fn      static void SPI0_cb_func (uint32_t event)
  * @brief   SPI0 callback function.
@@ -130,7 +131,9 @@ static void SPI1_cb_func(uint32_t event)
         spi1_cb_status = 1;
     }
 }
+#endif
 
+#if 0
 /**
  * @fn      static void spi0_spi1_transfer(void)
  * @brief   demo application function for data transfer.
@@ -269,6 +272,8 @@ error_spi0_uninitialize:
     printf("*** Demo app using SPI0 & SPI1 is ended ***\n");
 }
 
+#endif
+
 int main()
 {
 #if defined(RTE_CMSIS_Compiler_STDOUT_Custom)
@@ -280,5 +285,11 @@ int main()
         }
     }
 #endif
+#if 0
     spi0_spi1_transfer();
+#else
+    SPI_support_InitPort(SPI_1, false, 0, 0);
+    char buffer[8] = { 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h' };
+    SPI_support_Transfer(SPI_1, (const void *)&buffer, NULL, 8);
+#endif
 }

@@ -4,6 +4,8 @@ project:
     - group: App
       files:
         - file: main.c
+        - file: SPI_support.c
+        - file: SPI_support.h
 
   output:
     base-name: $Project$
