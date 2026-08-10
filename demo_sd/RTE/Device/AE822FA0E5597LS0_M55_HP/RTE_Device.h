@@ -10796,7 +10796,7 @@
 //    <50000000=> 50MHz
 // <i> Defines SDC0 Clock frequency in Hz
 // <i> Default: 25MHz
-#define RTE_SDC_CLOCK_SELECT    25000000
+#define RTE_SDC_CLOCK_SELECT    50000000
 
 //    <o> SDC DMA SELECT
 //    <0=> SDMA

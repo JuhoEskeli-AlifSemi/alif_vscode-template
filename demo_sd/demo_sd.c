@@ -20,6 +20,7 @@
 /* System Includes */
 #include <stdio.h>
 #include <inttypes.h>
+#include <stdbool.h>
 #include "RTE_Device.h"
 #include "se_services_port.h"
 
@@ -29,6 +30,7 @@
 #include "board_config.h"
 
 #include "RTE_Components.h"
+#include CMSIS_device_header
 #if defined(RTE_CMSIS_Compiler_STDOUT)
 #include "retarget_init.h"
 #include "retarget_stdout.h"
@@ -46,6 +48,16 @@
     0x2000  // start reading and writing raw data from partition sector
 volatile unsigned char sdbuffer[512 * 4] __attribute__((section("sd_dma_buf")))
 __attribute__((aligned(32)));
+
+/* Backup of each sector's original content so the test is non-destructive. */
+volatile unsigned char sdsavebuffer[512] __attribute__((section("sd_dma_buf")))
+__attribute__((aligned(32)));
+
+/* Large buffer for the read-only sequential throughput benchmark. */
+#define SD_BENCH_CHUNK_SECTORS 128u  /* 64 KB per multi-block read */
+#define SD_BENCH_TOTAL_SECTORS 8192u /* 4 MB total, read-only */
+volatile unsigned char sdreadbuf[SD_BENCH_CHUNK_SECTORS * 512u]
+    __attribute__((section("sd_dma_buf"))) __attribute__((aligned(32)));
 
 const diskio_t   *p_SD_Driver  = &SD_Driver;
 volatile uint32_t dma_done_irq = 0;
@@ -97,6 +109,42 @@ void sd_pwr_cb(uint8_t power_on)
     return;
 }
 #endif
+
+/* Issue a single-sector DMA read and block until the completion callback fires. */
+static int sd_read_wait(uint32_t sector, volatile uint8_t *buf)
+{
+    dma_done_irq = 0;
+    if (p_SD_Driver->disk_read(sector, 1, buf) != SD_DRV_STATUS_OK) {
+        return -1;
+    }
+    while (!dma_done_irq) {
+    }
+    return 0;
+}
+
+/* Issue a single-sector DMA write and block until the completion callback fires. */
+static int sd_write_wait(uint32_t sector, volatile uint8_t *buf)
+{
+    dma_done_irq = 0;
+    if (p_SD_Driver->disk_write(sector, 1, buf) != SD_DRV_STATUS_OK) {
+        return -1;
+    }
+    while (!dma_done_irq) {
+    }
+    return 0;
+}
+
+/* Issue a multi-block DMA read and block until the completion callback fires. */
+static int sd_read_n_wait(uint32_t sector, uint16_t blocks, volatile uint8_t *buf)
+{
+    dma_done_irq = 0;
+    if (p_SD_Driver->disk_read(sector, blocks, buf) != SD_DRV_STATUS_OK) {
+        return -1;
+    }
+    while (!dma_done_irq) {
+    }
+    return 0;
+}
 
 /**
   \fn           BareMetalSDTest(uint32_t startSec, uint32_t EndSector)
@@ -220,34 +268,139 @@ void BareMetalSDTest(uint32_t startSec, uint32_t EndSector)
         return;
     }
 
-    /* read and print sector data from start to end */
+    /* Write a known pattern to each sector, then read it back and verify.
+     * A mismatch is the real proof of whether RTE_SDC_CLOCK_SELECT is reliable
+     * end-to-end; the DWT cycle count lets you compare throughput vs 25MHz.
+     * Each sector's original content is backed up and restored, so the test is
+     * non-destructive. */
+    uint32_t total = 0, passed = 0, failed = 0, first_bad = 0;
+
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CYCCNT = 0;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    uint32_t start_cycles = DWT->CYCCNT;
+
     while (startSec < EndSector) {
 
-        dma_done_irq = 0;  // clear dma done callback status
+        total++;
 
-        if (p_SD_Driver->disk_read(startSec, 1, (volatile uint8_t *) sdbuffer) != SD_DRV_STATUS_OK) {
+        /* Back up the original sector so we can restore it afterwards. */
+        if (sd_read_wait(startSec, (volatile uint8_t *) sdsavebuffer)) {
+            printf("Backup read failed at sector %" PRIu32 "\n", startSec);
+            if (!failed) first_bad = startSec;
+            failed++;
+            startSec++;
             continue;
         }
 
-        while (!dma_done_irq) {  // wait for dma completion interrupt callback
+        /* Fill buffer with a sector-dependent known pattern and write it. */
+        for (j = 0; j < 128; j++) {
+            p[j] = (startSec << 8) ^ (0xA5A50000u + (uint32_t) j);
+        }
+        if (sd_write_wait(startSec, (volatile uint8_t *) sdbuffer)) {
+            printf("Write failed at sector %" PRIu32 "\n", startSec);
+            if (!failed) first_bad = startSec;
+            failed++;
+            startSec++;
+            continue;
         }
 
-        printf("Sector %" PRIu32 "\n", startSec);
-        j = 0;
-
-        while (j < 128) {
-            printf("%08" PRIx32 " %08" PRIx32 " %08" PRIx32 " %08" PRIx32 "\n",
-                   p[j + 0],
-                   p[j + 1],
-                   p[j + 2],
-                   p[j + 3]);
-            j += 4;
+        /* Overwrite buffer so the read-back must fetch from the card. */
+        for (j = 0; j < 128; j++) {
+            p[j] = 0xFFFFFFFFu;
+        }
+        if (sd_read_wait(startSec, (volatile uint8_t *) sdbuffer)) {
+            printf("Read failed at sector %" PRIu32 "\n", startSec);
+            if (!failed) first_bad = startSec;
+            failed++;
+            sd_write_wait(startSec, (volatile uint8_t *) sdsavebuffer); /* try to restore */
+            startSec++;
+            continue;
         }
 
-        if (p_SD_Driver->disk_write(startSec, 1, (volatile uint8_t *) sdbuffer) != SD_DRV_STATUS_OK) {
-            printf("Unable to write Back sector: %" PRIu32 "\n", startSec);
+        /* Verify read-back data against the written pattern. */
+        bool sector_ok = true;
+        for (j = 0; j < 128; j++) {
+            uint32_t expect = (startSec << 8) ^ (0xA5A50000u + (uint32_t) j);
+            if (p[j] != expect) {
+                if (sector_ok) {
+                    printf("MISMATCH sector %" PRIu32 " word %d: got %08" PRIx32
+                           " exp %08" PRIx32 "\n",
+                           startSec, j, p[j], expect);
+                }
+                sector_ok = false;
+            }
         }
+        if (sector_ok) {
+            passed++;
+        } else {
+            if (!failed) first_bad = startSec;
+            failed++;
+        }
+
+        /* Restore the original sector content. */
+        if (sd_write_wait(startSec, (volatile uint8_t *) sdsavebuffer)) {
+            printf("Restore write failed at sector %" PRIu32 "\n", startSec);
+        }
+
         startSec++;
+    }
+
+    uint32_t elapsed_cycles = DWT->CYCCNT - start_cycles;
+
+    printf("\n==== SD verify @ %d Hz: %" PRIu32 " sectors, %" PRIu32 " passed, %" PRIu32
+           " failed ====\n",
+           RTE_SDC_CLOCK_SELECT, total, passed, failed);
+    if (failed) {
+        printf("RESULT: FAIL (first bad sector = %" PRIu32 ")\n", first_bad);
+    } else {
+        printf("RESULT: PASS\n");
+    }
+
+    /* Throughput over all transfers (backup+write+verify+restore = 4 per sector),
+     * including command/DMA overhead. */
+    if (elapsed_cycles && SystemCoreClock) {
+        uint64_t bytes = (uint64_t) total * 512u * 4u;
+        uint32_t kbps  = (uint32_t) ((bytes * (uint64_t) SystemCoreClock) /
+                                    ((uint64_t) elapsed_cycles * 1024ULL));
+        printf("Throughput: %" PRIu32 " KB/s (%" PRIu32 " CPU cycles @ %" PRIu32 " Hz)\n",
+               kbps, elapsed_cycles, (uint32_t) SystemCoreClock);
+    }
+
+    /* Read-only multi-block throughput benchmark: large sequential reads amortize
+     * per-command overhead so the data phase (and thus the SD clock) dominates.
+     * Reads have no card programming time, so this scales with RTE_SDC_CLOCK_SELECT. */
+    {
+        uint32_t sec       = BAREMETAL_SD_TEST_RAW_SECTOR;
+        uint32_t remaining = SD_BENCH_TOTAL_SECTORS;
+        uint32_t read_ok   = 0;
+
+        DWT->CYCCNT        = 0;
+        uint32_t bench_start = DWT->CYCCNT;
+
+        while (remaining) {
+            uint16_t n = (remaining < SD_BENCH_CHUNK_SECTORS) ? (uint16_t) remaining
+                                                              : (uint16_t) SD_BENCH_CHUNK_SECTORS;
+            if (sd_read_n_wait(sec, n, (volatile uint8_t *) sdreadbuf)) {
+                printf("Benchmark read failed at sector %" PRIu32 "\n", sec);
+                break;
+            }
+            sec       += n;
+            remaining -= n;
+            read_ok   += n;
+        }
+
+        uint32_t bench_cycles = DWT->CYCCNT - bench_start;
+        if (bench_cycles && SystemCoreClock && read_ok) {
+            uint64_t bytes = (uint64_t) read_ok * 512u;
+            uint32_t kbps  = (uint32_t) ((bytes * (uint64_t) SystemCoreClock) /
+                                        ((uint64_t) bench_cycles * 1024ULL));
+            printf("\n==== SD sequential read benchmark @ %d Hz ====\n", RTE_SDC_CLOCK_SELECT);
+            printf("Read %" PRIu32 " KB in %" PRIu32 " cycles (%u-sector blocks)\n",
+                   (uint32_t) (bytes / 1024u), bench_cycles, (unsigned) SD_BENCH_CHUNK_SECTORS);
+            printf("Read throughput: %" PRIu32 " KB/s (%" PRIu32 ".%02" PRIu32 " MB/s)\n",
+                   kbps, kbps / 1024u, ((kbps % 1024u) * 100u) / 1024u);
+        }
     }
 
     p_SD_Driver->disk_uninitialize(SDMMC_DEV_ID);
