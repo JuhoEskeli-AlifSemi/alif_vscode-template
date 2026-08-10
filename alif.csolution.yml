@@ -12,7 +12,8 @@ solution:
   compiler: GCC
 
   packs:
-    - pack: AlifSemiconductor::Ensemble@2.2.0
+    - pack: AlifSemiconductor::Ensemble
+      path: ../cmsis_sd_card
     - pack: ARM::CMSIS@6.1.0
 
   target-types:
@@ -54,6 +55,7 @@ solution:
       target-set:
         - set:
           images:
+            - project-context: demo_sd.debug
             - project-context: blinky.debug
 
     - type: DevKit-E8-HP
@@ -64,6 +66,7 @@ solution:
       target-set:
         - set:
           images:
+            - project-context: demo_sd.debug
             - project-context: blinky.debug
 
     - type: AppKit-E8-HE
@@ -104,3 +107,4 @@ solution:
     - project: blinky/blinky.cproject.yml
     - project: hello/hello.cproject.yml
     - project: hello_rtt/hello_rtt.cproject.yml
+    - project: demo_sd/demo_sd.cproject.yml
