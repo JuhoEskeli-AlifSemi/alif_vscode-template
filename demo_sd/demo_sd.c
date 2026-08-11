@@ -500,6 +500,40 @@ void BareMetalSDTest(uint32_t startSec, uint32_t EndSector)
     }
 
     printf("\nGeneration %" PRIu32 " committed and confirmed on card.\n", generation);
+
+    /* Performance test: read-only sequential benchmark over the region just
+     * written. Large multi-block reads with no per-word compare give the clean
+     * data-phase throughput (scales with RTE_SDC_CLOCK_SELECT). */
+    {
+        uint32_t remaining = RT_REGION_SECTORS;
+        uint32_t sec       = target_start;
+        uint32_t read_ok   = 0;
+
+        DWT->CYCCNT = 0;
+        while (remaining) {
+            uint16_t n = (remaining < SD_CHUNK_SECTORS) ? (uint16_t) remaining
+                                                        : (uint16_t) SD_CHUNK_SECTORS;
+            if (sd_read_n_wait(sec, n, (volatile uint8_t *) sdreadbuf)) {
+                printf("Benchmark read failed at sector %" PRIu32 "\n", sec);
+                break;
+            }
+            sec       += n;
+            remaining -= n;
+            read_ok   += n;
+        }
+        uint32_t bcyc = DWT->CYCCNT;
+        if (bcyc && SystemCoreClock && read_ok) {
+            uint64_t bytes = (uint64_t) read_ok * 512u;
+            uint32_t kbps  = (uint32_t) ((bytes * (uint64_t) SystemCoreClock) /
+                                        ((uint64_t) bcyc * 1024ULL));
+            printf("\n==== Sequential read benchmark @ %d Hz ====\n", RTE_SDC_CLOCK_SELECT);
+            printf("Read %" PRIu32 " KB in %" PRIu32 " cycles (%u-sector blocks)\n",
+                   (uint32_t) (bytes / 1024u), bcyc, (unsigned) SD_CHUNK_SECTORS);
+            printf("Read throughput: %" PRIu32 " KB/s (%" PRIu32 ".%02" PRIu32 " MB/s)\n",
+                   kbps, kbps / 1024u, ((kbps % 1024u) * 100u) / 1024u);
+        }
+    }
+
     printf(">>> Please RESET the board now to verify it survives the reset. <<<\n");
     WAIT_FOREVER_LOOP
 }
