@@ -49,15 +49,22 @@
 volatile unsigned char sdbuffer[512 * 4] __attribute__((section("sd_dma_buf")))
 __attribute__((aligned(32)));
 
-/* Backup of each sector's original content so the test is non-destructive. */
-volatile unsigned char sdsavebuffer[512] __attribute__((section("sd_dma_buf")))
-__attribute__((aligned(32)));
-
-/* Large buffer for the read-only sequential throughput benchmark. */
-#define SD_BENCH_CHUNK_SECTORS 128u  /* 64 KB per multi-block read */
-#define SD_BENCH_TOTAL_SECTORS 8192u /* 4 MB total, read-only */
-volatile unsigned char sdreadbuf[SD_BENCH_CHUNK_SECTORS * 512u]
+/* Multi-block DMA buffer used by the reliability test (64 KB = 128 sectors). */
+#define SD_CHUNK_SECTORS 128u
+volatile unsigned char sdreadbuf[SD_CHUNK_SECTORS * 512u]
     __attribute__((section("sd_dma_buf"))) __attribute__((aligned(32)));
+
+/* Reset-persistent reliability test: a one-sector "superblock" (magic header)
+ * plus two alternating data regions (ping-pong). Destroys the card range
+ * [base, base + 1 + 2*RT_REGION_SECTORS). base = BAREMETAL_SD_TEST_RAW_SECTOR. */
+#define RT_MAGIC          0x53445254u /* 'SDRT' */
+#define RT_VERSION        1u
+#define RT_REGION_SECTORS 8192u       /* 4 MB per region */
+
+/* disk_initialize can fail intermittently on a warm reset when the card was
+ * left in 1.8V/UHS mode from the previous run; power-cycle the card via its
+ * reset line and retry so a clean 3.3V power-on identification succeeds. */
+#define SD_INIT_MAX_ATTEMPTS 10u
 
 const diskio_t   *p_SD_Driver  = &SD_Driver;
 volatile uint32_t dma_done_irq = 0;
@@ -146,6 +153,96 @@ static int sd_read_n_wait(uint32_t sector, uint16_t blocks, volatile uint8_t *bu
     return 0;
 }
 
+/* Issue a multi-block DMA write and block until the completion callback fires. */
+static int sd_write_n_wait(uint32_t sector, uint32_t blocks, volatile uint8_t *buf)
+{
+    dma_done_irq = 0;
+    if (p_SD_Driver->disk_write(sector, blocks, buf) != SD_DRV_STATUS_OK) {
+        return -1;
+    }
+    while (!dma_done_irq) {
+    }
+    return 0;
+}
+
+/* Deterministic per-word pattern; mixing the absolute sector index makes a
+ * misplaced or duplicated sector detectable. */
+static uint32_t rt_word(uint32_t seed, uint32_t gen, uint32_t sector, uint32_t widx)
+{
+    uint32_t x = seed ^ (gen * 0x9E3779B1u) ^ (sector * 0x85EBCA77u) ^ (widx * 0xC2B2AE3Du);
+    x ^= x >> 16;
+    x *= 0x7FEB352Du;
+    x ^= x >> 15;
+    x *= 0x846CA68Bu;
+    x ^= x >> 16;
+    return x;
+}
+
+/* Simple checksum over the 7 header words, used to detect a valid superblock. */
+static uint32_t rt_hdr_sum(const volatile uint32_t *h)
+{
+    uint32_t s = 0xA5A5A5A5u;
+    for (int i = 0; i < 7; i++) {
+        s = (s * 31u) + h[i];
+    }
+    return s;
+}
+
+/* Fill sdreadbuf in chunks and write [start, start+count) with the pattern. */
+static int rt_write_region(uint32_t start, uint32_t count, uint32_t seed, uint32_t gen)
+{
+    uint32_t *w    = (uint32_t *) sdreadbuf;
+    uint32_t  done = 0;
+
+    while (done < count) {
+        uint32_t nleft = count - done;
+        uint16_t n     = (nleft < SD_CHUNK_SECTORS) ? (uint16_t) nleft : (uint16_t) SD_CHUNK_SECTORS;
+        for (uint32_t s = 0; s < n; s++) {
+            uint32_t sec = start + done + s;
+            for (uint32_t k = 0; k < 128u; k++) {
+                w[(s * 128u) + k] = rt_word(seed, gen, sec, k);
+            }
+        }
+        if (sd_write_n_wait(start + done, n, (volatile uint8_t *) sdreadbuf)) {
+            return -1;
+        }
+        done += n;
+    }
+    return 0;
+}
+
+/* Read [start, start+count) in chunks and count words that differ from the
+ * expected pattern; records the first mismatch location. */
+static uint32_t rt_verify_region(uint32_t start, uint32_t count, uint32_t seed, uint32_t gen,
+                                 uint32_t *first_sec, uint32_t *first_widx)
+{
+    uint32_t *w    = (uint32_t *) sdreadbuf;
+    uint32_t  done = 0;
+    uint32_t  mism = 0;
+
+    while (done < count) {
+        uint32_t nleft = count - done;
+        uint16_t n     = (nleft < SD_CHUNK_SECTORS) ? (uint16_t) nleft : (uint16_t) SD_CHUNK_SECTORS;
+        if (sd_read_n_wait(start + done, n, (volatile uint8_t *) sdreadbuf)) {
+            return count; /* read failure: treat whole chunk as failed */
+        }
+        for (uint32_t s = 0; s < n; s++) {
+            uint32_t sec = start + done + s;
+            for (uint32_t k = 0; k < 128u; k++) {
+                if (w[(s * 128u) + k] != rt_word(seed, gen, sec, k)) {
+                    if (mism == 0) {
+                        *first_sec  = sec;
+                        *first_widx = k;
+                    }
+                    mism++;
+                }
+            }
+        }
+        done += n;
+    }
+    return mism;
+}
+
 /**
   \fn           BareMetalSDTest(uint32_t startSec, uint32_t EndSector)
   \brief        Baremetal SD driver Test Function
@@ -156,8 +253,6 @@ static int sd_read_n_wait(uint32_t sector, uint16_t blocks, volatile uint8_t *bu
 void BareMetalSDTest(uint32_t startSec, uint32_t EndSector)
 {
 
-    int        j;
-    uint32_t  *p = (uint32_t *) sdbuffer;
     /* Zero-init: 2.2.0 sd_param_t adds card_det_cb/vsel_cb the driver calls if non-NULL */
     sd_param_t sd_param = {0};
 
@@ -263,149 +358,150 @@ void BareMetalSDTest(uint32_t startSec, uint32_t EndSector)
     sd_param.pwr_cb     = 0;
 #endif
 
-    if (p_SD_Driver->disk_initialize(&sd_param)) {
-        printf("SD initialization failed...\n");
+    /* Init can fail intermittently on a warm reset when the card was left in
+     * 1.8V/UHS mode; power-cycle the card and retry (see SD_INIT_MAX_ATTEMPTS). */
+    int      init_rc = -1;
+    uint32_t attempt;
+    for (attempt = 1; attempt <= SD_INIT_MAX_ATTEMPTS; attempt++) {
+#ifdef BOARD_SD_RESET_GPIO_PORT
+        sd_pwr_cb(0); /* drive card reset/power low (includes reset delay) */
+        sd_pwr_cb(1); /* release */
+        sys_busy_loop_us(SDMMC_RESET_DELAY_US);
+#endif
+        init_rc = p_SD_Driver->disk_initialize(&sd_param);
+        if (init_rc == SD_DRV_STATUS_OK) {
+            break;
+        }
+        printf("SD init attempt %" PRIu32 "/%u failed; power-cycling card and retrying...\n",
+               attempt, (unsigned) SD_INIT_MAX_ATTEMPTS);
+        p_SD_Driver->disk_uninitialize(SDMMC_DEV_ID);
+        sys_busy_loop_us(20000u);
+    }
+    if (init_rc != SD_DRV_STATUS_OK) {
+        printf("SD initialization failed after %u attempts...\n", (unsigned) SD_INIT_MAX_ATTEMPTS);
         return;
     }
+    if (attempt > 1u) {
+        printf("SD init succeeded on attempt %" PRIu32 ".\n", attempt);
+    }
 
-    /* Write a known pattern to each sector, then read it back and verify.
-     * A mismatch is the real proof of whether RTE_SDC_CLOCK_SELECT is reliable
-     * end-to-end; the DWT cycle count lets you compare throughput vs 25MHz.
-     * Each sector's original content is backed up and restored, so the test is
-     * non-destructive. */
-    uint32_t total = 0, passed = 0, failed = 0, first_bad = 0;
+    /* ---- Reset-persistent reliability test ---------------------------------
+     * Verify the generation written before the reset is actually on the card
+     * (survived loss of cache/RAM), then write the next generation to the other
+     * ping-pong region and commit the header to point at it. Repeat on every
+     * reset to stress the bus at RTE_SDC_CLOCK_SELECT over time. */
+    (void) EndSector;
+
+    uint32_t  hdr_sector = startSec;
+    uint32_t  region_a   = startSec + 1u;
+    uint32_t  region_b   = region_a + RT_REGION_SECTORS;
+    uint32_t *h          = (uint32_t *) sdbuffer;
 
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
-    DWT->CYCCNT = 0;
     DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
-    uint32_t start_cycles = DWT->CYCCNT;
 
-    while (startSec < EndSector) {
+    if (sd_read_wait(hdr_sector, (volatile uint8_t *) sdbuffer)) {
+        printf("Reliability test: header read failed; aborting.\n");
+        WAIT_FOREVER_LOOP
+    }
 
-        total++;
+    bool     valid = (h[0] == RT_MAGIC) && (h[1] == RT_VERSION) && (h[7] == rt_hdr_sum(h));
+    uint32_t generation, seed, active;
 
-        /* Back up the original sector so we can restore it afterwards. */
-        if (sd_read_wait(startSec, (volatile uint8_t *) sdsavebuffer)) {
-            printf("Backup read failed at sector %" PRIu32 "\n", startSec);
-            if (!failed) first_bad = startSec;
-            failed++;
-            startSec++;
-            continue;
-        }
+    if (valid) {
+        active                = h[2];
+        generation            = h[3];
+        seed                  = h[4];
+        uint32_t region_count = h[5];
+        uint32_t stored_clk   = h[6];
+        uint32_t active_start = active ? region_b : region_a;
 
-        /* Fill buffer with a sector-dependent known pattern and write it. */
-        for (j = 0; j < 128; j++) {
-            p[j] = (startSec << 8) ^ (0xA5A50000u + (uint32_t) j);
-        }
-        if (sd_write_wait(startSec, (volatile uint8_t *) sdbuffer)) {
-            printf("Write failed at sector %" PRIu32 "\n", startSec);
-            if (!failed) first_bad = startSec;
-            failed++;
-            startSec++;
-            continue;
-        }
+        printf("\n==== Reliability: found generation %" PRIu32 " (seed %08" PRIx32
+               ", region %c, %" PRIu32 " sectors, written @ %" PRIu32 " Hz) ====\n",
+               generation, seed, active ? 'B' : 'A', region_count, stored_clk);
+        printf("VERIFY: reading back %" PRIu32 " sectors to confirm they survived the reset...\n",
+               region_count);
 
-        /* Overwrite buffer so the read-back must fetch from the card. */
-        for (j = 0; j < 128; j++) {
-            p[j] = 0xFFFFFFFFu;
-        }
-        if (sd_read_wait(startSec, (volatile uint8_t *) sdbuffer)) {
-            printf("Read failed at sector %" PRIu32 "\n", startSec);
-            if (!failed) first_bad = startSec;
-            failed++;
-            sd_write_wait(startSec, (volatile uint8_t *) sdsavebuffer); /* try to restore */
-            startSec++;
-            continue;
-        }
+        uint32_t first_sec = 0, first_widx = 0;
+        DWT->CYCCNT   = 0;
+        uint32_t mism = rt_verify_region(active_start, region_count, seed, generation,
+                                         &first_sec, &first_widx);
+        uint32_t vcyc = DWT->CYCCNT;
 
-        /* Verify read-back data against the written pattern. */
-        bool sector_ok = true;
-        for (j = 0; j < 128; j++) {
-            uint32_t expect = (startSec << 8) ^ (0xA5A50000u + (uint32_t) j);
-            if (p[j] != expect) {
-                if (sector_ok) {
-                    printf("MISMATCH sector %" PRIu32 " word %d: got %08" PRIx32
-                           " exp %08" PRIx32 "\n",
-                           startSec, j, p[j], expect);
-                }
-                sector_ok = false;
-            }
-        }
-        if (sector_ok) {
-            passed++;
+        if (mism == 0) {
+            printf("VERIFY generation %" PRIu32 ": PASS (all %" PRIu32
+                   " sectors matched after reset)\n",
+                   generation, region_count);
         } else {
-            if (!failed) first_bad = startSec;
-            failed++;
+            printf("VERIFY generation %" PRIu32 ": FAIL (%" PRIu32 " mismatched words; first at "
+                   "sector %" PRIu32 " word %" PRIu32 ")\n",
+                   generation, mism, first_sec, first_widx);
         }
-
-        /* Restore the original sector content. */
-        if (sd_write_wait(startSec, (volatile uint8_t *) sdsavebuffer)) {
-            printf("Restore write failed at sector %" PRIu32 "\n", startSec);
-        }
-
-        startSec++;
-    }
-
-    uint32_t elapsed_cycles = DWT->CYCCNT - start_cycles;
-
-    printf("\n==== SD verify @ %d Hz: %" PRIu32 " sectors, %" PRIu32 " passed, %" PRIu32
-           " failed ====\n",
-           RTE_SDC_CLOCK_SELECT, total, passed, failed);
-    if (failed) {
-        printf("RESULT: FAIL (first bad sector = %" PRIu32 ")\n", first_bad);
-    } else {
-        printf("RESULT: PASS\n");
-    }
-
-    /* Throughput over all transfers (backup+write+verify+restore = 4 per sector),
-     * including command/DMA overhead. */
-    if (elapsed_cycles && SystemCoreClock) {
-        uint64_t bytes = (uint64_t) total * 512u * 4u;
-        uint32_t kbps  = (uint32_t) ((bytes * (uint64_t) SystemCoreClock) /
-                                    ((uint64_t) elapsed_cycles * 1024ULL));
-        printf("Throughput: %" PRIu32 " KB/s (%" PRIu32 " CPU cycles @ %" PRIu32 " Hz)\n",
-               kbps, elapsed_cycles, (uint32_t) SystemCoreClock);
-    }
-
-    /* Read-only multi-block throughput benchmark: large sequential reads amortize
-     * per-command overhead so the data phase (and thus the SD clock) dominates.
-     * Reads have no card programming time, so this scales with RTE_SDC_CLOCK_SELECT. */
-    {
-        uint32_t sec       = BAREMETAL_SD_TEST_RAW_SECTOR;
-        uint32_t remaining = SD_BENCH_TOTAL_SECTORS;
-        uint32_t read_ok   = 0;
-
-        DWT->CYCCNT        = 0;
-        uint32_t bench_start = DWT->CYCCNT;
-
-        while (remaining) {
-            uint16_t n = (remaining < SD_BENCH_CHUNK_SECTORS) ? (uint16_t) remaining
-                                                              : (uint16_t) SD_BENCH_CHUNK_SECTORS;
-            if (sd_read_n_wait(sec, n, (volatile uint8_t *) sdreadbuf)) {
-                printf("Benchmark read failed at sector %" PRIu32 "\n", sec);
-                break;
-            }
-            sec       += n;
-            remaining -= n;
-            read_ok   += n;
-        }
-
-        uint32_t bench_cycles = DWT->CYCCNT - bench_start;
-        if (bench_cycles && SystemCoreClock && read_ok) {
-            uint64_t bytes = (uint64_t) read_ok * 512u;
+        if (vcyc && SystemCoreClock) {
+            uint64_t bytes = (uint64_t) region_count * 512u;
             uint32_t kbps  = (uint32_t) ((bytes * (uint64_t) SystemCoreClock) /
-                                        ((uint64_t) bench_cycles * 1024ULL));
-            printf("\n==== SD sequential read benchmark @ %d Hz ====\n", RTE_SDC_CLOCK_SELECT);
-            printf("Read %" PRIu32 " KB in %" PRIu32 " cycles (%u-sector blocks)\n",
-                   (uint32_t) (bytes / 1024u), bench_cycles, (unsigned) SD_BENCH_CHUNK_SECTORS);
-            printf("Read throughput: %" PRIu32 " KB/s (%" PRIu32 ".%02" PRIu32 " MB/s)\n",
+                                        ((uint64_t) vcyc * 1024ULL));
+            printf("VERIFY read: %" PRIu32 " KB/s (%" PRIu32 ".%02" PRIu32 " MB/s)\n",
                    kbps, kbps / 1024u, ((kbps % 1024u) * 100u) / 1024u);
         }
+
+        /* Advance to the next generation in the other region. */
+        generation += 1u;
+        seed         = (seed * 1664525u) + 1013904223u + DWT->CYCCNT;
+        active      ^= 1u;
+    } else {
+        printf("\n==== Reliability: no valid header found; initializing test ====\n");
+        generation = 1u;
+        seed       = 0xDEADBEEFu ^ DWT->CYCCNT;
+        active     = 0u;
     }
 
-    p_SD_Driver->disk_uninitialize(SDMMC_DEV_ID);
+    uint32_t target_start = active ? region_b : region_a;
 
-    return;
+    printf("WRITE: generation %" PRIu32 " (seed %08" PRIx32 ") to region %c (%" PRIu32
+           " sectors)...\n",
+           generation, seed, active ? 'B' : 'A', (uint32_t) RT_REGION_SECTORS);
+
+    DWT->CYCCNT = 0;
+    if (rt_write_region(target_start, RT_REGION_SECTORS, seed, generation)) {
+        printf("WRITE failed; aborting.\n");
+        WAIT_FOREVER_LOOP
+    }
+    uint32_t wcyc = DWT->CYCCNT;
+    if (wcyc && SystemCoreClock) {
+        uint64_t bytes = (uint64_t) RT_REGION_SECTORS * 512u;
+        uint32_t kbps  = (uint32_t) ((bytes * (uint64_t) SystemCoreClock) /
+                                    ((uint64_t) wcyc * 1024ULL));
+        printf("WRITE: %" PRIu32 " KB/s (%" PRIu32 ".%02" PRIu32 " MB/s)\n",
+               kbps, kbps / 1024u, ((kbps % 1024u) * 100u) / 1024u);
+    }
+
+    /* Commit the header last: it only becomes valid once the region is fully on
+     * the card, so a reset during the write leaves the previous generation
+     * intact and still pointed-to. */
+    h[0] = RT_MAGIC;
+    h[1] = RT_VERSION;
+    h[2] = active;
+    h[3] = generation;
+    h[4] = seed;
+    h[5] = RT_REGION_SECTORS;
+    h[6] = (uint32_t) RTE_SDC_CLOCK_SELECT;
+    h[7] = rt_hdr_sum(h);
+    if (sd_write_wait(hdr_sector, (volatile uint8_t *) sdbuffer)) {
+        printf("Header commit failed; aborting.\n");
+        WAIT_FOREVER_LOOP
+    }
+
+    /* Read the header back from the card to confirm it is committed to media. */
+    if (sd_read_wait(hdr_sector, (volatile uint8_t *) sdbuffer) || (h[0] != RT_MAGIC) ||
+        (h[3] != generation) || (h[7] != rt_hdr_sum(h))) {
+        printf("Header read-back mismatch; commit not confirmed!\n");
+        WAIT_FOREVER_LOOP
+    }
+
+    printf("\nGeneration %" PRIu32 " committed and confirmed on card.\n", generation);
+    printf(">>> Please RESET the board now to verify it survives the reset. <<<\n");
+    WAIT_FOREVER_LOOP
 }
 
 int main()
