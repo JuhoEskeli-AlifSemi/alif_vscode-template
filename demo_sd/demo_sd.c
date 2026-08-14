@@ -117,6 +117,35 @@ void sd_pwr_cb(uint8_t power_on)
 }
 #endif
 
+/* SD_VSEL = P6_3 drives the VT4857 level-translator SEL: HIGH selects VCCA=1.8V,
+ * LOW selects VSD=3.3V. The SD controller's internal voltage register is not
+ * wired on this board, so this GPIO is the only way to change the I/O voltage. */
+#define BOARD_SD_VSEL_GPIO_PORT 6
+#define BOARD_SD_VSEL_GPIO_PIN  3
+/* Set 0 to disable the P6_3 vsel_cb and revert to the previous behavior. */
+#define SD_USE_VSEL_CB          1
+extern ARM_DRIVER_GPIO ARM_Driver_GPIO_(BOARD_SD_VSEL_GPIO_PORT);
+
+/* vsel_cb: voltage 0 = 3.3V, 1 = 1.8V. Lazily configures P6_3 as GPIO output. */
+void sd_vsel_cb(uint8_t voltage)
+{
+    static bool      vsel_initialized = false;
+    ARM_DRIVER_GPIO *gpioSD_VSEL      = &ARM_Driver_GPIO_(BOARD_SD_VSEL_GPIO_PORT);
+
+    if (!vsel_initialized) {
+        vsel_initialized = true;
+        pinconf_set(PORT_(BOARD_SD_VSEL_GPIO_PORT), BOARD_SD_VSEL_GPIO_PIN, 0, 0);
+        gpioSD_VSEL->Initialize(BOARD_SD_VSEL_GPIO_PIN, NULL);
+        gpioSD_VSEL->PowerControl(BOARD_SD_VSEL_GPIO_PIN, ARM_POWER_FULL);
+        gpioSD_VSEL->SetDirection(BOARD_SD_VSEL_GPIO_PIN, GPIO_PIN_DIRECTION_OUTPUT);
+    }
+
+    gpioSD_VSEL->SetValue(BOARD_SD_VSEL_GPIO_PIN,
+                          voltage ? GPIO_PIN_OUTPUT_STATE_HIGH : GPIO_PIN_OUTPUT_STATE_LOW);
+
+    printf("SD VSEL cb: %s (P6_3=%s)\n", voltage ? "1.8V" : "3.3V", voltage ? "HIGH" : "LOW");
+}
+
 /* Issue a single-sector DMA read and block until the completion callback fires. */
 static int sd_read_wait(uint32_t sector, volatile uint8_t *buf)
 {
@@ -351,11 +380,18 @@ void BareMetalSDTest(uint32_t startSec, uint32_t EndSector)
     sd_param.bus_width    = RTE_SDC_BUS_WIDTH;
     sd_param.dma_mode     = RTE_SDC_DMA_SELECT;
     sd_param.app_callback = sd_cb;
+#if SD_USE_VSEL_CB
+    sd_param.vsel_cb      = sd_vsel_cb;
+#endif
 
 #ifdef BOARD_SD_RESET_GPIO_PORT
     sd_param.pwr_cb     = sd_pwr_cb;
 #else
     sd_param.pwr_cb     = 0;
+#endif
+
+#if SD_USE_VSEL_CB
+    sd_vsel_cb(0); /* start at 3.3V (VSD) before the card powers up */
 #endif
 
     /* Init can fail intermittently on a warm reset when the card was left in
