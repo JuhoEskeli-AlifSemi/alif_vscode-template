@@ -570,15 +570,40 @@ void BareMetalSDTest(uint32_t startSec, uint32_t EndSector)
         }
     }
 
+    /* Repeated last so it survives a cold boot where the early init prints scroll off. */
+    printf("SD init required %" PRIu32 " attempt(s) this boot.\n", attempt);
     printf(">>> Please RESET the board now to verify it survives the reset. <<<\n");
     WAIT_FOREVER_LOOP
 }
+
+/* Known-good static run profile, per core. A JLink/debugger load does not apply
+ * the boot TOC run profile, so we set a complete, explicit profile here. */
+#if defined(RTSS_HP)
+#define APP_CPU_CLK_FREQ CLOCK_FREQUENCY_400MHZ
+#define APP_MEM_BLOCKS   (SRAM4_1_MASK | SRAM4_2_MASK | SRAM5_1_MASK | SRAM5_2_MASK | MRAM_MASK)
+#else
+#define APP_CPU_CLK_FREQ CLOCK_FREQUENCY_160MHZ
+#define APP_MEM_BLOCKS   (SRAM2_MASK | SRAM3_MASK | MRAM_MASK)
+#endif
 
 int main()
 {
     uint32_t      service_error_code;
     uint32_t      error_code = SERVICES_REQ_SUCCESS;
-    run_profile_t runp       = {0};
+    run_profile_t runp       = {
+        .power_domains   = PD_VBAT_AON_MASK | PD_SSE700_AON_MASK | PD_SYST_MASK |
+                           PD_SESS_MASK | PD_DBSS_MASK,
+        .dcdc_voltage    = 825,
+        .dcdc_mode       = DCDC_MODE_PWM,
+        .aon_clk_src     = CLK_SRC_LFXO,
+        .run_clk_src     = CLK_SRC_PLL,
+        .cpu_clk_freq    = APP_CPU_CLK_FREQ,
+        .scaled_clk_freq = SCALED_FREQ_RC_ACTIVE_76_8_MHZ,
+        .memory_blocks   = APP_MEM_BLOCKS,
+        .ip_clock_gating = SDC_MASK,
+        .phy_pwr_gating  = LDO_PHY_MASK,
+        .vdd_ioflex_3V3  = IOFLEX_LEVEL_1V8,
+    };
 #if defined(RTE_CMSIS_Compiler_STDOUT_Custom)
     extern int stdout_init(void);
     int32_t    ret;
@@ -611,17 +636,9 @@ int main()
         return 0;
     }
 
-    /* A JLink/debugger load does not apply the boot TOC run profile, so the SD
-     * block is left gated. Ungate the SDMMC IP clock and power the I/O LDO. */
-    error_code = SERVICES_get_run_cfg(se_services_s_handle, &runp, &service_error_code);
-    if (error_code) {
-        printf("SE: get_run_cfg = %" PRIu32 "\n", error_code);
-        return 0;
-    }
-
-    runp.ip_clock_gating |= SDC_MASK;
-    runp.phy_pwr_gating  |= LDO_PHY_MASK;
-
+    /* Apply the static run profile (see runp initializer above). This
+     * ungates the SDMMC IP clock (SDC_MASK) and powers the I/O LDO (LDO_PHY_MASK),
+     * which a debugger load would otherwise leave gated. */
     error_code = SERVICES_set_run_cfg(se_services_s_handle, &runp, &service_error_code);
     if (error_code) {
         printf("SE: set_run_cfg = %" PRIu32 "\n", error_code);
