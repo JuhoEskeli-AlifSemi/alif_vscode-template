@@ -66,6 +66,26 @@ volatile unsigned char sdreadbuf[SD_CHUNK_SECTORS * 512u]
  * reset line and retry so a clean 3.3V power-on identification succeeds. */
 #define SD_INIT_MAX_ATTEMPTS 10u
 
+/* SD pad electrical settings. Defaults preserve the current values
+ * (input buffer enabled only). Experiment here:
+ * bump drive strength, enable fast slew, and/or add a Schmitt trigger on inputs:
+ *   #define SD_PAD_DRIVE PADCTRL_OUTPUT_DRIVE_STRENGTH_8MA
+ *   #define SD_PAD_SLEW  PADCTRL_SLEW_RATE_FAST
+ *   #define SD_PAD_IN    PADCTRL_SCHMITT_TRIGGER_ENABLE
+ * Use lower drive / slower slew instead if you see overshoot or ringing. */
+#ifndef SD_PAD_DRIVE
+#define SD_PAD_DRIVE 0u
+#endif
+#ifndef SD_PAD_SLEW
+#define SD_PAD_SLEW 0u
+#endif
+#ifndef SD_PAD_IN
+#define SD_PAD_IN 0u
+#endif
+#define SD_PAD_CLK (PADCTRL_READ_ENABLE | SD_PAD_DRIVE | SD_PAD_SLEW)
+#define SD_PAD_CMD (PADCTRL_READ_ENABLE | SD_PAD_IN | SD_PAD_DRIVE | SD_PAD_SLEW)
+#define SD_PAD_DAT (PADCTRL_READ_ENABLE | SD_PAD_IN | SD_PAD_DRIVE | SD_PAD_SLEW)
+
 const diskio_t   *p_SD_Driver  = &SD_Driver;
 volatile uint32_t dma_done_irq = 0;
 
@@ -330,48 +350,48 @@ void BareMetalSDTest(uint32_t startSec, uint32_t EndSector)
     pinconf_set(PORT_(BOARD_SD_CMD_A_GPIO_PORT),
                 BOARD_SD_CMD_A_GPIO_PIN,
                 PINMUX_ALTERNATE_FUNCTION_6,
-                PADCTRL_READ_ENABLE);  // cmd
+                SD_PAD_CMD);  // cmd
     pinconf_set(PORT_(BOARD_SD_CLK_A_GPIO_PORT),
                 BOARD_SD_CLK_A_GPIO_PIN,
                 PINMUX_ALTERNATE_FUNCTION_6,
-                PADCTRL_READ_ENABLE);  // clk
+                SD_PAD_CLK);  // clk
     pinconf_set(PORT_(BOARD_SD_D0_A_GPIO_PORT),
                 BOARD_SD_D0_A_GPIO_PIN,
                 PINMUX_ALTERNATE_FUNCTION_7,
-                PADCTRL_READ_ENABLE);  // d0
+                SD_PAD_DAT);  // d0
 
 #if (RTE_SDC_BUS_WIDTH == SDMMC_4_BIT_MODE) || (RTE_SDC_BUS_WIDTH == SDMMC_8_BIT_MODE)
     pinconf_set(PORT_(BOARD_SD_D1_A_GPIO_PORT),
                 BOARD_SD_D1_A_GPIO_PIN,
                 PINMUX_ALTERNATE_FUNCTION_7,
-                PADCTRL_READ_ENABLE);  // d1
+                SD_PAD_DAT);  // d1
     pinconf_set(PORT_(BOARD_SD_D2_A_GPIO_PORT),
                 BOARD_SD_D2_A_GPIO_PIN,
                 PINMUX_ALTERNATE_FUNCTION_7,
-                PADCTRL_READ_ENABLE);  // d2
+                SD_PAD_DAT);  // d2
     pinconf_set(PORT_(BOARD_SD_D3_A_GPIO_PORT),
                 BOARD_SD_D3_A_GPIO_PIN,
                 PINMUX_ALTERNATE_FUNCTION_6,
-                PADCTRL_READ_ENABLE);  // d3
+                SD_PAD_DAT);  // d3
 #endif
 
 #if RTE_SDC_BUS_WIDTH == SDMMC_8_BIT_MODE
     pinconf_set(PORT_(BOARD_SD_D4_A_GPIO_PORT),
                 BOARD_SD_D4_A_GPIO_PIN,
                 PINMUX_ALTERNATE_FUNCTION_6,
-                PADCTRL_READ_ENABLE);  // d4
+                SD_PAD_DAT);  // d4
     pinconf_set(PORT_(BOARD_SD_D5_A_GPIO_PORT),
                 BOARD_SD_D5_A_GPIO_PIN,
                 PINMUX_ALTERNATE_FUNCTION_5,
-                PADCTRL_READ_ENABLE);  // d5
+                SD_PAD_DAT);  // d5
     pinconf_set(PORT_(BOARD_SD_D6_A_GPIO_PORT),
                 BOARD_SD_D6_A_GPIO_PIN,
                 PINMUX_ALTERNATE_FUNCTION_5,
-                PADCTRL_READ_ENABLE);  // d6
+                SD_PAD_DAT);  // d6
     pinconf_set(PORT_(BOARD_SD_D7_A_GPIO_PORT),
                 BOARD_SD_D7_A_GPIO_PIN,
                 PINMUX_ALTERNATE_FUNCTION_5,
-                PADCTRL_READ_ENABLE);  // d7
+                SD_PAD_DAT);  // d7
 #endif
 #endif
 
